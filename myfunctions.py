@@ -5,10 +5,6 @@ import matplotlib.pyplot as plt
 ################################
 # 设置程序算法内置参数
 numberOfModes = 9  # 实际使用的预测模式数
-precision = 27  # 精度过小时解码会进入死循环
-whole = 2 ** precision
-half = int(whole / 2)
-quarter = int(half / 2)
 
 # 由于精度问题以下参数应满足exp(- symbolMax/(sigma * quantizationScale)) > 1e -20 即 sigma > symbolMax / (quantizationScale * 20)
 quantizationScale = 10
@@ -17,7 +13,7 @@ sigma = 100  # 过小时会用完精度，解码进入死循环
 # 计算频率表
 # (0, 1)区间内插入的小数是游程编码的码元
 symbols = np.hstack([np.arange(-int(symbolMax/quantizationScale), 0), np.round(np.linspace(0.01, 0.64, 64), 2), np.arange(1, int(symbolMax/quantizationScale))])
-frequencyTable = np.vstack([np.exp(np.abs(symbols) / sigma), symbols]).T  # 符号频率分布为拉普拉斯分布，使用拉普拉斯分布公式代替计算频率表
+frequencyTable = np.ones(len(symbols))
 # frequencyTable[:, 0] = frequencyTable[:, 0] / np.sum(frequencyTable[:, 0])
 ###############################
 # 定义数据结构
@@ -99,135 +95,127 @@ def byte_array_to_zero_one(inputByteArray):
         inputString += format(inputByteArray[i], '08b')
     return inputString
 
-
-# 自适应算术编码中重新计算概率表的函数
-def compute_c_d_R(frequencyTable, symbol):
-    index = np.argwhere(frequencyTable[:, 1] == symbol)
-    frequencyTable[index[0, 0], 0] = frequencyTable[index[0, 0], 0] + 0.1
-    c = np.zeros(frequencyTable.shape)
-    c[:, 1] = frequencyTable[:, 1]
-    c[0, 0] = 0
-    for i in range(1, len(frequencyTable)):
-        c[i, 0] = frequencyTable[i - 1, 0] + c[i - 1, 0]
-    d = np.zeros(c.shape)
-    d[:, 1] = c[:, 1]
-    d[:, 0] = c[:, 0] + frequencyTable[:, 0]
-    c = {c[i, 1]: c[i, 0] for i in range(len(c))}
-    d = {d[i, 1]: d[i, 0] for i in range(len(d))}
-    return c, d, d[symbols[-1]]
-
-
-# 自适应算术编码器
 def arithmetic_encoder(zigzagArray):
-    # 算术编码
-    # 设置算术编码参数
-    c = np.zeros(frequencyTable.shape)
-    c[:, 1] = frequencyTable[:, 1]
-    c[0, 0] = 0
-    R = np.sum(frequencyTable[:, 0])
-    for i in range(1, len(frequencyTable)):
-        c[i, 0] = frequencyTable[i - 1, 0] + c[i - 1, 0]
-    d = np.zeros(c.shape)
-    d[:, 1] = c[:, 1]
-    d[:, 0] = c[:, 0] + frequencyTable[:, 0]
-    c = {c[i, 1]: c[i, 0] for i in range(len(c))}
-    d = {d[i, 1]: d[i, 0] for i in range(len(d))}
-    a = int()
-    b = int(whole)
-    s = int()
-    outputString = ''
-    length = len(zigzagArray)
-    for i in range(length):
-        w = b - a
-        if w == 0 or w == 1:
-            print("precision error")
-        b = a + int(w * d[round(zigzagArray[i], 2)] / R)
-        a = a + int(w * c[round(zigzagArray[i], 2)] / R)
-        c, d, R = compute_c_d_R(frequencyTable, zigzagArray[i])
-        while b < half or a > half:
-            if b < half:
-                outputString += '0' + s * '1'
-                s = 0
-                a = int(2 * a)
-                b = int(2 * b)
-            elif a > half:
-                outputString += '1' + s * '0'
-                s = 0
-                a = 2 * int(a - half)
-                b = 2 * int(b - half)
-        while a > quarter and b < 3 * quarter:
-            s = s + 1
-            a = 2 * (a - quarter)
-            b = 2 * (b - quarter)
-    s = s + 1
-    if a <= quarter:
-        outputString += '0' + s * '1'
-    else:
-        outputString += '1' + s * '0'
+    ac = ArithmeticCoder(symbols, frequencyTable)
+    bits = ac.encode(zigzagArray)
+    outputString = "".join([str(i) for i in bits])
     return outputString
 
-
-# 自适应解码器
 def arithmetic_decoder(inputString, length):
-    zigzagArray = np.zeros(length)
-    # 设置算术编码参数
-    c = np.zeros(frequencyTable.shape)
-    c[:, 1] = frequencyTable[:, 1]
-    c[0, 0] = 0
-    R = np.sum(frequencyTable[:, 0])
-    for i in range(1, len(frequencyTable)):
-        c[i, 0] = frequencyTable[i - 1, 0] + c[i - 1, 0]
-    d = np.zeros(c.shape)
-    d[:, 1] = c[:, 1]
-    d[:, 0] = c[:, 0] + frequencyTable[:, 0]
-    c = {c[i, 1]: c[i, 0] for i in range(len(c))}
-    d = {d[i, 1]: d[i, 0] for i in range(len(d))}
-    a = int(0)
-    b = int(whole)
-    M = len(inputString)
-    z = 0
-    i = 1
-    zk = 0
-    while i <= precision and i <= M:
-        if inputString[i - 1] == '1':
-            z = z + 2**(precision - i)
-        i += 1
-    while zk < length:
-        for j in frequencyTable[:, 1]:
+    bits = [int(i) for i in inputString]
+    ac = ArithmeticCoder(symbols, frequencyTable)
+    zigzagArray = ac.decode(bits, length)
+    return zigzagArray
+
+class ArithmeticCoder:
+    def __init__(self, symbols, frequency):
+        self.precision = 27  # 精度过小时解码会进入死循环
+        self.whole = 2 ** self.precision
+        self.half = int(self.whole / 2)
+        self.quarter = int(self.half / 2)
+        self.symbols = symbols
+        self.sym_idx = {symbols[i]:i for i in range(len(symbols))}
+        self.sym_freq = np.array(frequency)
+
+    # 自适应算术编码中重新计算概率表的函数
+    def compute_c_d_R(self, symbol, c, d):
+        index = self.sym_idx[symbol]
+        c[index+1:] += 1
+        d[index:] +=1
+        return d[-1]
+
+    # 自适应算术编码器
+    def encode(self, aos):
+        sym_freq = self.sym_freq.copy()
+        R = np.sum(sym_freq)
+        d = np.cumsum(sym_freq)
+        c = d - sym_freq
+        a = int()
+        b = int(self.whole)
+        s = int()
+        bits = []
+        length = len(aos)
+        for i in range(length):
             w = b - a
             if w == 0 or w == 1:
                 print("precision error")
-            b0 = a + int(w * d[j] / R)
-            a0 = a + int(w * c[j] / R)
-            if a0 <= z < b0:
-                zigzagArray[zk] = j
-                zk += 1
+            b = a + int(w * d[self.sym_idx[aos[i]]]// R)
+            a = a + int(w * c[self.sym_idx[aos[i]]] // R)
+            R = self.compute_c_d_R(aos[i], c, d)
+            while b < self.half or a > self.half:
+                if b < self.half:
+                    bits += [0] + s * [1]
+                    s = 0
+                    a = int(2 * a)
+                    b = int(2 * b)
+                elif a > self.half:
+                    bits += [1] + s * [0]
+                    s = 0
+                    a = 2 * int(a - self.half)
+                    b = 2 * int(b - self.half)
+            while a > self.quarter and b < 3 * self.quarter:
+                s = s + 1
+                a = 2 * (a - self.quarter)
+                b = 2 * (b - self.quarter)
+        s = s + 1
+        if a <= self.quarter:
+            bits += [0] + s * [1]
+        else:
+            bits += [1] + s * [0]
+        return bits
 
-                a = a0
-                b = b0
-                c, d, R = compute_c_d_R(frequencyTable, j)
-                break
-        while b < half or a > half:
-            if b < half:
-                a = 2 * a
-                b = 2 * b
-                z = 2 * z
-            elif a > half:
-                a = 2 * (a - half)
-                b = 2 * (b - half)
-                z = 2 * (z - half)
-            if i <= M and inputString[i - 1] == '1':
-                z = z + 1
-            i = i + 1
-        while a > quarter and b < 3 * quarter:
-            a = 2 * (a - quarter)
-            b = 2 * (b - quarter)
-            z = 2 * (z - quarter)
-            if i <= M and inputString[i - 1] == '1':
-                z = z + 1
-            i = i + 1
-    return zigzagArray
-
+    # 自适应解码器
+    def decode(self, bits, length):
+        aos = [0 for i in range(length)]
+        # 设置算术编码参数
+        sym_freq = self.sym_freq.copy()
+        R = np.sum(sym_freq)
+        d = np.cumsum(sym_freq)
+        c = d - sym_freq
+        a = int(0)
+        b = int(self.whole)
+        M = len(bits)
+        z = 0
+        i = 1
+        zk = 0
+        while i <= self.precision and i <= M:
+            if bits[i - 1] == 1:
+                z = z + 2**(self.precision - i)
+            i += 1
+        while zk < length:
+            for j in self.symbols:
+                w = b - a
+                if w == 0 or w == 1:
+                    print("precision error")
+                b0 = a + int(w * d[self.sym_idx[j]] // R)
+                a0 = a + int(w * c[self.sym_idx[j]] // R)
+                if a0 <= z < b0:
+                    aos[zk] = j
+                    zk += 1
+                    a = a0
+                    b = b0
+                    R = self.compute_c_d_R(j, c, d)
+                    break
+            while b < self.half or a > self.half:
+                if b < self.half:
+                    a = 2 * a
+                    b = 2 * b
+                    z = 2 * z
+                elif a > self.half:
+                    a = 2 * (a - self.half)
+                    b = 2 * (b - self.half)
+                    z = 2 * (z - self.half)
+                if i <= M and bits[i - 1] == 1:
+                    z = z + 1
+                i = i + 1
+            while a > self.quarter and b < 3 * self.quarter:
+                a = 2 * (a - self.quarter)
+                b = 2 * (b - self.quarter)
+                z = 2 * (z - self.quarter)
+                if i <= M and bits[i - 1] == 1:
+                    z = z + 1
+                i = i + 1
+        return aos
 
 # 预测编码器，mode为传入预测编码模式编号
 def predict(inputImage, mode, meanValue):
