@@ -17,30 +17,27 @@ warnings.filterwarnings(
     category=SymPyDeprecationWarning,
     module=r"."
 )
-
-def compute_integers(expr):
-    # Function to recursively process expressions
-    pattern = re.compile(r'[,()]')
-    def process_term(term):
-
-        if not pattern.search(str(term)):
-            return term.simplify()
-        if isinstance(term, (sp.Mul, sp.Add, sp.Pow)):  # If term is a SymPy expression that needs processing
-            return term
-        elif isinstance(term, (tuple, list)):  # If term is a tuple or list, process each item
-            processed_items = [process_term(item) for item in term]
-            if isinstance(term, tuple):
-                return tuple(processed_items)
+def simplify_numeric_constants(expr):
+    if isinstance(expr, sp.Tuple)  or isinstance(expr, tuple):
+        # If it's a tuple, apply simplification recursively to each element
+        simplified_tuple = tuple(simplify_numeric_constants(el) for el in expr)
+        return simplified_tuple
+    elif isinstance(expr, sp.Mul):
+        # Separate numeric and symbolic parts in a multiplication
+        numeric_part = 1
+        non_numeric_parts = []
+        
+        for arg in expr.args:
+            if arg.is_number:
+                numeric_part *= arg  # Multiply numeric constants
             else:
-                return processed_items
-        elif isinstance(term, (int, sp.Integer)):  # If term is an integer, simply return it
-            return sp.Integer(term)
-        else:
-            return term
+                non_numeric_parts.append(simplify_numeric_constants(arg))  # Recursively simplify non-numeric parts
 
-    # Process the whole expression
-    processed_expr = process_term(expr)
-    return processed_expr
+        # Return simplified multiplication without evaluation (to preserve structure)
+        return sp.Mul(numeric_part, *non_numeric_parts, evaluate=False)
+    else:
+        # Return the expression as-is if it's neither a tuple nor a multiplication
+        return expr
 
 def find_longest_repeat(s):
     n = len(s)
@@ -79,7 +76,7 @@ class FoldRepeatCoder:
     def __init__(self, zero, one):
         self.zero = zero
         self.one = one
-        self.symbols = zero + one + '()+*'
+        self.symbols = zero + one + '()+*0123456789'
     def encode(self, binary):
         binary_string = ''.join([str(i) for i in binary])
         compressed = recursive_fold_repeat_binary_string(binary_string)
@@ -87,7 +84,7 @@ class FoldRepeatCoder:
         
         # Use SymPy to simplify the result
         non_comm_expr = parse_expr(compressed, evaluate=False, transformations=T[:5]+T[6:])
-        simplified_expr = compute_integers(non_comm_expr)
+        simplified_expr = simplify_numeric_constants(non_comm_expr)
         simplified = str(simplified_expr)
     
         simplified = simplified.replace(" ","").replace(",","+")
@@ -109,7 +106,7 @@ def generate_random_binary(min_length, max_length):
 if __name__=='__main__':
     # Test case
     coder = FoldRepeatCoder('o', 'i')
-    for i in range(20):
+    for i in range(100):
         binary = generate_random_binary(10, 100)
         compressed = coder.encode(binary)
         print(compressed)
